@@ -5,6 +5,7 @@ import { supabase } from "../../lib/supabaseClient";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
+
 type Order = {
   id: string;
   customer_id: string;
@@ -25,6 +26,7 @@ type Customer = {
 };
 
 export default function OrdersPage() {
+  const RECEIPTS_BUCKET = process.env.NEXT_PUBLIC_SUPABASE_RECEIPTS_BUCKET || "receipts";
   const [orders, setOrders] = useState<Order[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(false);
@@ -34,6 +36,7 @@ export default function OrdersPage() {
   const [material, setMaterial] = useState("");
   const [quantity, setQuantity] = useState(1);
   const [pickupAddress, setPickupAddress] = useState("");
+  const [price, setPrice] = useState<number>(0);
 
   useEffect(() => {
     fetchOrders();
@@ -62,60 +65,312 @@ export default function OrdersPage() {
 
   async function addOrder(e: React.FormEvent) {
     e.preventDefault();
-    const { error } = await supabase.from("orders").insert({
-      customer_id: customerId,
-      service_type: serviceType,
-      material,
-      quantity,
-      pickup_address: pickupAddress,
-    });
+    // Persist price in price_list (upsert by service_type + material)
+    try {
+      const isExpress = serviceType.trim().toLowerCase() === "express";
+      const payload: Record<string, any> = {
+        service_type: serviceType,
+        material,
+        ...(isExpress ? { express_price: price } : { base_price: price }),
+      };
+      await supabase
+        .from("price_list")
+        .upsert(payload, { onConflict: "service_type,material" });
+    } catch (err) {
+      console.error("Failed to upsert price_list", err);
+    }
+    const { data: newOrderData, error } = await supabase
+      .from("orders")
+      .insert({
+        customer_id: customerId,
+        service_type: serviceType,
+        material,
+        quantity,
+        pickup_address: pickupAddress,
+      })
+      .select("*, customers(name, phone)")
+      .single();
     if (error) {
       console.error(error);
       return;
+    }
+
+    try {
+      if (newOrderData) {
+        await generateAndStoreReceipt(newOrderData, price);
+      }
+    } catch (err) {
+      console.error("Failed to generate/store receipt:", err);
     }
     setCustomerId("");
     setServiceType("");
     setMaterial("");
     setQuantity(1);
     setPickupAddress("");
+    setPrice(0);
     fetchOrders();
   }
 
-  // --- Generate PDF Receipt ---
-  function downloadReceipt(order: Order) {
-    const doc = new jsPDF();
+  // Load logo from public folder and cache as data URL
+  let cachedLogoDataUrl: string | null = null;
+  let cachedWatermarkDataUrl: string | null = null;
+  async function getLogoDataUrl(): Promise<string> {
+    if (cachedLogoDataUrl) return cachedLogoDataUrl;
+    try {
+      const response = await fetch("/logo.png");
+      const blob = await response.blob();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result));
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      cachedLogoDataUrl = dataUrl;
+      return dataUrl;
+    } catch {
+      return "";
+    }
+  }
 
-    // Add Logo (must be in public/logo.png)
-    const logo = "/logo.png";
-    doc.addImage(logo, "PNG", 10, 10, 40, 40);
+  // Create a low-opacity watermark version of the logo and cache it
+  async function getWatermarkDataUrl(): Promise<string> {
+    if (cachedWatermarkDataUrl) return cachedWatermarkDataUrl;
+    try {
+      const logo = await getLogoDataUrl();
+      if (!logo) return "";
+      const transparent = await makeTransparentImage(logo, 0.07);
+      cachedWatermarkDataUrl = transparent;
+      return transparent;
+    } catch {
+      return "";
+    }
+  }
 
-    // Title
-    doc.setFontSize(18);
-    doc.text("Don Lustre - Receipt", 105, 20, { align: "center" });
-
-    // Order Info
-    doc.setFontSize(12);
-    doc.text(`Order ID: ${order.id}`, 14, 60);
-    doc.text(`Date: ${new Date(order.created_at).toLocaleString()}`, 14, 65);
-
-    // Customer Info
-    doc.text(`Customer: ${order.customers?.name}`, 14, 70);
-    doc.text(`Phone: ${order.customers?.phone}`, 14, 78);
-    doc.text(`Pickup Address: ${order.pickup_address}`, 14, 86);
-
-    // Table for order details
-    autoTable(doc, {
-      startY: 100,
-      head: [["Service Type", "Material", "Quantity"]],
-      body: [[order.service_type, order.material, order.quantity.toString()]],
+  async function makeTransparentImage(dataUrl: string, opacity: number): Promise<string> {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.globalAlpha = Math.max(0, Math.min(opacity, 1));
+        ctx.drawImage(img, 0, 0);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
     });
+  }
 
-    // Footer
-    doc.setFontSize(10);
-    doc.text("Thank you for choosing Don Lustre. Estimated 24–48 hrs service.", 14, 140);
+  // --- Generate PDF Receipt ---
+ 
+function createReceiptPdf(order: Order, logoBase64: string = "", watermarkBase64: string = "", unitPrice?: number, displayOrderNumber?: number) {
+  const doc = new jsPDF();
 
-    // Save PDF
-    doc.save(`receipt_${order.id}.pdf`);
+  // Background watermark (covers most of the page, very light)
+  try {
+    if (watermarkBase64) {
+      // Position roughly centered and large
+      doc.addImage(watermarkBase64, "PNG", 25, 30, 160, 200);
+    }
+  } catch {}
+
+  // Logo (prefer provided base64; otherwise skip silently)
+  try {
+    if (logoBase64) {
+      doc.addImage(logoBase64, "PNG", 14, 10, 40, 40);
+    }
+  } catch {}
+
+  // Title
+  doc.setFontSize(18);
+  doc.text("Don Lustre - Receipt", 105, 20, { align: "center" });
+
+  // Order Info
+  doc.setFontSize(12);
+  doc.text(`Order No: ${displayOrderNumber ?? "-"}` , 14, 56);
+  doc.text(`Date: ${new Date(order.created_at).toLocaleString()}`, 14, 64);
+
+  // Customer Info
+  doc.text(`Customer: ${order.customers?.name ?? ""}`, 14, 70);
+  doc.text(`Phone: ${order.customers?.phone ?? ""}`, 14, 78);
+  doc.text(`Pickup Address: ${order.pickup_address}`, 14, 86);
+
+  // Table for order details
+  autoTable(doc, {
+    startY: 100,
+    head: [["Service Type", "Material", "Quantity", "Unit Price", "Total"]],
+    body: [[
+      order.service_type,
+      order.material,
+      order.quantity.toString(),
+      unitPrice != null ? unitPrice.toFixed(2) : "-",
+      unitPrice != null ? (unitPrice * order.quantity).toFixed(2) : "-",
+    ]],
+  });
+
+  // Footer
+  doc.setFontSize(10);
+  doc.text(
+    "Thank you for choosing Don Lustre. Estimated 24–48 hrs service.",
+    14,
+    140
+  );
+
+  return doc;
+}
+
+  async function uploadReceiptAndSaveRecord(order: Order, pdfBlob: Blob, totalAmount: number | null) {
+    const filePath = `receipt_${order.id}.pdf`;
+    try {
+      const { error: uploadError } = await supabase.storage
+        .from(RECEIPTS_BUCKET)
+        .upload(filePath, pdfBlob, { contentType: "application/pdf", upsert: true });
+      if (uploadError) {
+        const message = (uploadError as any)?.message || String(uploadError);
+        if (message.toLowerCase().includes("bucket not found")) {
+          throw new Error(
+            `Supabase Storage bucket "${RECEIPTS_BUCKET}" not found. Create it in Storage or set NEXT_PUBLIC_SUPABASE_RECEIPTS_BUCKET to an existing bucket.`
+          );
+        }
+        throw uploadError;
+      }
+      const { data: publicUrlData } = supabase.storage.from(RECEIPTS_BUCKET).getPublicUrl(filePath);
+      const receiptUrl = publicUrlData.publicUrl;
+      await upsertReceiptRecord(order.id, receiptUrl, totalAmount);
+      return receiptUrl;
+    } catch (err) {
+      // Ensure a DB record exists even when upload fails
+      await upsertReceiptRecord(order.id, null, totalAmount);
+      throw err;
+    }
+  }
+
+  async function generateAndStoreReceipt(order: Order, unitPrice: number) {
+    const [logo, watermark] = await Promise.all([
+      getLogoDataUrl(),
+      getWatermarkDataUrl(),
+    ]);
+    const seqNum = await getSequentialOrderNumber(order.created_at);
+    const doc = createReceiptPdf(order, logo, watermark, unitPrice, seqNum ?? undefined);
+    const blob = doc.output("blob");
+    const totalAmount = unitPrice * order.quantity;
+    try {
+      await uploadReceiptAndSaveRecord(order, blob, totalAmount);
+    } catch (e) {
+      // Already ensured DB record in uploadReceiptAndSaveRecord; swallow here
+      console.error("Receipt upload failed; DB record ensured.", e);
+    }
+  }
+
+  async function downloadReceipt(order: Order) {
+    try {
+      const [logo, watermark] = await Promise.all([
+        getLogoDataUrl(),
+        getWatermarkDataUrl(),
+      ]);
+      const unitPrice = await getUnitPrice(order.service_type, order.material);
+      const seqNum = await getSequentialOrderNumber(order.created_at);
+      const doc = createReceiptPdf(
+        order,
+        logo,
+        watermark,
+        unitPrice ?? undefined,
+        seqNum ?? undefined
+      );
+      const blob = doc.output("blob");
+      // Upload & save DB record (idempotent via upsert storage)
+      const totalAmount = unitPrice != null ? unitPrice * order.quantity : null;
+      await uploadReceiptAndSaveRecord(order, blob, totalAmount);
+      // Also trigger download for the user
+      doc.save(`receipt_${order.id}.pdf`);
+    } catch (e) {
+      console.error("Failed to upload/save receipt", e);
+      // Still let the user download locally
+      try {
+        const [logo, watermark] = await Promise.all([
+          getLogoDataUrl(),
+          getWatermarkDataUrl(),
+        ]);
+        const unitPrice = await getUnitPrice(order.service_type, order.material);
+        const seqNum = await getSequentialOrderNumber(order.created_at);
+        const doc = createReceiptPdf(
+          order,
+          logo,
+          watermark,
+          unitPrice ?? undefined,
+          seqNum ?? undefined
+        );
+        doc.save(`receipt_${order.id}.pdf`);
+      } catch {}
+      // Provide a visible hint once (best-effort)
+      if (e instanceof Error && e.message.includes("bucket")) {
+        alert(e.message);
+      }
+    }
+  }
+
+  async function upsertReceiptRecord(orderId: string, receiptUrl: string | null, totalAmount: number | null) {
+    // Check if a receipt exists for this order
+    const { data: existing, error: selErr } = await supabase
+      .from("receipts")
+      .select("id")
+      .eq("order_id", orderId)
+      .maybeSingle();
+    if (selErr) {
+      console.error("Failed to check existing receipt", selErr);
+    }
+    if (existing?.id) {
+      const { error: updErr } = await supabase
+        .from("receipts")
+        .update({ receipt_url: receiptUrl, total_amount: totalAmount })
+        .eq("id", existing.id);
+      if (updErr) console.error("Failed to update receipt record", updErr);
+      return;
+    }
+    const { error: insErr } = await supabase.from("receipts").insert({
+      order_id: orderId,
+      receipt_url: receiptUrl,
+      total_amount: totalAmount,
+    });
+    if (insErr) console.error("Failed to insert receipt record", insErr);
+  }
+
+  async function getUnitPrice(serviceType: string, material: string): Promise<number | null> {
+    const { data, error } = await supabase
+      .from("price_list")
+      .select("base_price, express_price")
+      .eq("service_type", serviceType)
+      .eq("material", material)
+      .maybeSingle();
+    if (error) {
+      console.error("Failed to fetch unit price", error);
+      return null;
+    }
+    const isExpress = serviceType.trim().toLowerCase() === "express";
+    const row: any = data;
+    if (!row) return null;
+    return isExpress ? row.express_price ?? row.base_price ?? null : row.base_price ?? null;
+  }
+
+  // Compute sequential order number based on creation time
+  async function getSequentialOrderNumber(orderCreatedAt: string): Promise<number | null> {
+    const { count, error } = await supabase
+      .from("orders")
+      .select("id", { count: "exact", head: true })
+      .lte("created_at", orderCreatedAt);
+    if (error) {
+      console.error("Failed to compute sequential order number", error);
+      return null;
+    }
+    return count ?? null;
   }
 
   return (
@@ -177,6 +432,18 @@ export default function OrdersPage() {
                 min="1"
                 value={quantity}
                 onChange={(e) => setQuantity(Number(e.target.value))}
+                className="w-full border rounded px-3 py-2 text-black"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-black mb-1">Unit Price</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={price}
+                onChange={(e) => setPrice(Number(e.target.value))}
                 className="w-full border rounded px-3 py-2 text-black"
                 required
               />
