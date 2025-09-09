@@ -172,57 +172,165 @@ export default function OrdersPage() {
   // --- Generate PDF Receipt ---
  
 function createReceiptPdf(order: Order, logoBase64: string = "", watermarkBase64: string = "", unitPrice?: number, displayOrderNumber?: number) {
+
   const doc = new jsPDF();
 
-  // Background watermark (covers most of the page, very light)
-  try {
-    if (watermarkBase64) {
-      // Position roughly centered and large
-      doc.addImage(watermarkBase64, "PNG", 25, 30, 160, 200);
-    }
-  } catch {}
 
-  // Logo (prefer provided base64; otherwise skip silently)
-  try {
-    if (logoBase64) {
-      doc.addImage(logoBase64, "PNG", 14, 10, 40, 40);
-    }
-  } catch {}
+  // Header background
+  doc.setFillColor(40, 60, 110); // dark blue
+  doc.rect(0, 0, 210, 28, 'F');
 
-  // Title
+  // Large background watermark logo (centered, light opacity, like uploaded image)
+  if (watermarkBase64) {
+    // A4: 210 x 297 mm, center at (105, 148.5)
+    // Place a large square logo, e.g., 170x170mm, centered
+    const logoSize = 190;
+    const x = (210 - logoSize) / 2;
+    const y = (290 - logoSize) / 2;
+    doc.addImage(watermarkBase64, 'PNG', x, y, logoSize, logoSize);
+  }
+
+  // Prominent logo in header (larger and more visible)
+// Replace the logo addition section in the createReceiptPdf function
+// Replace the logo addition section in the createReceiptPdf function
+if (logoBase64) {
+  doc.addImage(logoBase64, 'PNG', 10, 2, 25, 24); // Centered at x=82.5 (210/2 - 45/2), adjusted y and height
+}
+
+  // Business name
+  doc.setTextColor(255,255,255);
   doc.setFontSize(18);
-  doc.text("Don Lustre - Receipt", 105, 20, { align: "center" });
+  doc.text('Don Lustre', 105, 17, { align: 'center' });
 
-  // Order Info
-  doc.setFontSize(12);
-  doc.text(`Order No: ${displayOrderNumber ?? "-"}` , 14, 56);
-  doc.text(`Date: ${new Date(order.created_at).toLocaleString()}`, 14, 64);
+  // Info columns
+  doc.setFontSize(10);
+  doc.setTextColor(0,0,0);
+  doc.text(`Date: ${new Date(order.created_at).toLocaleDateString()}`, 10, 32);
+  doc.text(`Receipt #: DC-2025-${displayOrderNumber?.toString().padStart(4,'0') ?? '----'}`, 10, 38);
+  doc.text(`Cashier: John Smith`, 10, 44);
 
-  // Customer Info
-  doc.text(`Customer: ${order.customers?.name ?? ""}`, 14, 70);
-  doc.text(`Phone: ${order.customers?.phone ?? ""}`, 14, 78);
-  doc.text(`Pickup Address: ${order.pickup_address}`, 14, 86);
+  doc.text(`Customer Name: ${order.customers?.name ?? ''}`, 120, 32);
+  doc.text(`Phone: ${order.customers?.phone ?? ''}`, 120, 38);
+  doc.text(`Email: john.doe@email.com`, 120, 44);
 
-  // Table for order details
+  // Section: Order Details
+  doc.setDrawColor(40, 60, 110);
+  doc.setLineWidth(0.5);
+  doc.line(10, 50, 200, 50);
+  doc.setFontSize(11);
+  doc.setTextColor(40, 60, 110);
+  doc.text('Order Details', 10, 56);
+  doc.setTextColor(0,0,0);
+
+  // Table for order details (mocked as single row, can be extended for multiple items)
   autoTable(doc, {
-    startY: 100,
-    head: [["Service Type", "Material", "Quantity", "Unit Price", "Total"]],
-    body: [[
-      order.service_type,
-      order.material,
-      order.quantity.toString(),
-      unitPrice != null ? unitPrice.toFixed(2) : "-",
-      unitPrice != null ? (unitPrice * order.quantity).toFixed(2) : "-",
-    ]],
+    startY: 58,
+    head: [["Qty", "Item Description", "Service Type", "List Price", "Total"]],
+    body: [
+      [
+        order.quantity.toString(),
+        order.material,
+        order.service_type,
+        unitPrice != null ? unitPrice.toFixed(2) : '-',
+        unitPrice != null ? (unitPrice * order.quantity).toFixed(2) : '-',
+      ]
+    ],
+    theme: 'grid',
+    headStyles: { fillColor: [40, 60, 110], textColor: 255, fontStyle: 'bold' },
+    styles: { fontSize: 10 },
+    margin: { left: 10, right: 10 },
+    tableWidth: 190,
   });
+  let y = ((doc as any).lastAutoTable?.finalY) || 70;
 
+  // Section: Payment Summary
+  y += 6;
+  doc.setFontSize(11);
+  doc.setTextColor(40, 60, 110);
+  doc.text('Payment Summary', 10, y);
+  doc.setTextColor(0,0,0);
+  y += 2;
+  autoTable(doc, {
+    startY: y,
+    head: [["", ""]],
+    body: [
+      ["Subtotal:", unitPrice != null ? (unitPrice * order.quantity).toFixed(2) : '-'],
+      ["Tax (8.5%):", unitPrice != null ? ((unitPrice * order.quantity * 0.085).toFixed(2)) : '-'],
+      ["Total Amount:", unitPrice != null ? ((unitPrice * order.quantity * 1.085).toFixed(2)) : '-'],
+      ["Payment Method:", "Credit Card (Visa)"],
+      ["Transaction ID:", "TXN-824032"],
+    ],
+    theme: 'plain',
+    styles: { fontSize: 10 },
+    margin: { left: 10 },
+    tableWidth: 90,
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 40 }, 1: { cellWidth: 50 } },
+  });
+  y = ((doc as any).lastAutoTable?.finalY + 6) || (y + 6);
+  doc.setFontSize(11);
+  doc.setTextColor(40, 60, 110);
+  doc.text('Pickup Information', 120, y);
+  doc.setTextColor(0,0,0);
+  y += 2;
+  autoTable(doc, {
+    startY: y,
+    head: [["", ""]],
+    body: [
+      ["Drop-off Date:", new Date(order.created_at).toLocaleDateString()],
+      ["Pickup Date:", new Date(order.created_at).toLocaleDateString()],
+      ["Pickup Time:", "3:00 PM"],
+      ["Status:", "In Process"],
+      ["Rider Name:", "Alex Johnson"],
+      ["Rider Contact:", "(555) 232-3444"],
+    ],
+    theme: 'plain',
+    styles: { fontSize: 10 },
+    margin: { left: 120 },
+    tableWidth: 80,
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 35 }, 1: { cellWidth: 45 } },
+  });
+  // y = Math.max(((doc as any).lastAutoTable?.finalY + 8) || (y + 8), y + 30);
+  // doc.setFontSize(10);
+  // doc.setTextColor(40, 60, 110);
+  // doc.text('Notes', 10, y);
+  // doc.setTextColor(0,0,0);
+  // doc.setFontSize(9);
+  // doc.text("- Stain removal attempted on silk dress.", 14, y + 5);
+  // doc.text("- Customer requested light starch on shirts.", 14, y + 10);
+
+  // // Section: Terms & Conditions
+  // y += 18;
+  // doc.setFontSize(10);
+  // doc.setTextColor(40, 60, 110);
+  // doc.text('Terms & Conditions', 10, y);
+  // doc.setTextColor(0,0,0);
+  // doc.setFontSize(9);
+  // doc.text("Not responsible for items left beyond 30 days.", 14, y + 5);
+  // doc.text("We cannot ensure that we can return fabric for color fading, shrinkage, or manufacturer’s defects.", 14, y + 10);
+  // Replace the "Notes" section in the createReceiptPdf function
+// Section: Notes and Terms & Conditions
+y = ((doc as any).lastAutoTable?.finalY || y) + 30; // Start 30mm below the last table's end
+doc.setFontSize(10);
+doc.setTextColor(40, 60, 110);
+doc.text('Notes', 10, y + 26);
+doc.setTextColor(0, 0, 0);
+doc.setFontSize(9);
+doc.text("- Stain removal attempted on silk dress.", 14, y + 30);
+doc.text("- Customer requested light starch on shirts.", 14, y + 35);
+
+// Section: Terms & Conditions
+y += 40; // Add 20mm spacing before Terms & Conditions
+doc.setFontSize(10);
+doc.setTextColor(40, 60, 110);
+doc.text('Terms & Conditions', 10, y);
+doc.setTextColor(0, 0, 0);
+doc.setFontSize(9);
+doc.text("Not responsible22 for items left beyond 30 days.", 14, y + 5);
+doc.text("We cannot ensure that we can return fabric for color fading, shrinkage, or manufacturer's defects.", 14, y + 10);
   // Footer
   doc.setFontSize(10);
-  doc.text(
-    "Thank you for choosing Don Lustre. Estimated 24–48 hrs service.",
-    14,
-    140
-  );
+  doc.setTextColor(40, 60, 110);
+  doc.text("Thank you for choosing Don Lustre Dry Cleaners!", 105, 285, { align: 'center' });
 
   return doc;
 }
