@@ -12,6 +12,8 @@
     "@headlessui/react": "^2.2.7",
     "@radix-ui/react-dialog": "^1.1.15",
     "@supabase/supabase-js": "^2.57.2",
+    "jspdf": "^3.0.2",
+    "jspdf-autotable": "^5.0.2",
     "lucide-react": "^0.542.0",
     "next": "15.5.2",
     "papaparse": "^5.5.3",

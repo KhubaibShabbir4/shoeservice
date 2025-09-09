@@ -2,6 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
 type Order = {
   id: string;
@@ -77,6 +79,43 @@ export default function OrdersPage() {
     setQuantity(1);
     setPickupAddress("");
     fetchOrders();
+  }
+
+  // --- Generate PDF Receipt ---
+  function downloadReceipt(order: Order) {
+    const doc = new jsPDF();
+
+    // Add Logo (must be in public/logo.png)
+    const logo = "/logo.png";
+    doc.addImage(logo, "PNG", 10, 10, 40, 40);
+
+    // Title
+    doc.setFontSize(18);
+    doc.text("Don Lustre - Receipt", 105, 20, { align: "center" });
+
+    // Order Info
+    doc.setFontSize(12);
+    doc.text(`Order ID: ${order.id}`, 14, 60);
+    doc.text(`Date: ${new Date(order.created_at).toLocaleString()}`, 14, 65);
+
+    // Customer Info
+    doc.text(`Customer: ${order.customers?.name}`, 14, 70);
+    doc.text(`Phone: ${order.customers?.phone}`, 14, 78);
+    doc.text(`Pickup Address: ${order.pickup_address}`, 14, 86);
+
+    // Table for order details
+    autoTable(doc, {
+      startY: 100,
+      head: [["Service Type", "Material", "Quantity"]],
+      body: [[order.service_type, order.material, order.quantity.toString()]],
+    });
+
+    // Footer
+    doc.setFontSize(10);
+    doc.text("Thank you for choosing Don Lustre. Estimated 24–48 hrs service.", 14, 140);
+
+    // Save PDF
+    doc.save(`receipt_${order.id}.pdf`);
   }
 
   return (
@@ -178,12 +217,18 @@ export default function OrdersPage() {
                   <div className="text-xs text-black">
                     {o.material} • Qty: {o.quantity}
                   </div>
-                  <div className="text-xs text-black">
-                    {o.pickup_address}
-                  </div>
+                  <div className="text-xs text-black">{o.pickup_address}</div>
                 </div>
-                <div className="text-xs text-black">
-                  {new Date(o.created_at).toLocaleString()}
+                <div className="flex flex-col items-end gap-1">
+                  <div className="text-xs text-black">
+                    {new Date(o.created_at).toLocaleString()}
+                  </div>
+                  <button
+                    onClick={() => downloadReceipt(o)}
+                    className="text-xs bg-indigo-600 text-white px-2 py-1 rounded"
+                  >
+                    Download Receipt
+                  </button>
                 </div>
               </div>
             ))}
@@ -196,3 +241,4 @@ export default function OrdersPage() {
     </div>
   );
 }
+

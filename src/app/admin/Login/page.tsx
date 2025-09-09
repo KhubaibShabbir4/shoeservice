@@ -14,31 +14,42 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
 
-    let data: any = null;
-    let error: any = null;
+    type CheckAdminLoginResponse = { success: boolean };
+
+    const isCheckAdminLoginResponse = (
+      value: unknown
+    ): value is CheckAdminLoginResponse => {
+      if (typeof value !== "object" || value === null) return false;
+      const record = value as Record<string, unknown>;
+      return typeof record.success === "boolean";
+    };
 
     try {
-      const result = await supabase.rpc("check_admin_login", {
-        p_username: username,
-        p_password: password,
-      });
-      data = result.data;
-      error = result.error;
-    } catch (rpcErr: any) {
-      setError(rpcErr?.message || "Login failed due to a network error.");
-      return;
-    }
+      const result = await supabase.rpc(
+        "check_admin_login",
+        {
+          p_username: username,
+          p_password: password,
+        }
+      );
 
-    if (error) {
-      setError(error.message || "Login failed. Try again.");
-      return;
-    }
+      if (result.error) {
+        setError(result.error.message || "Login failed. Try again.");
+        return;
+      }
 
-    if (data && (data as any).success) {
-      localStorage.setItem("admin_logged_in", "true");
-      router.push("/admin");
-    } else {
-      setError("Invalid credentials");
+      if (isCheckAdminLoginResponse(result.data) && result.data.success) {
+        localStorage.setItem("admin_logged_in", "true");
+        router.push("/admin");
+      } else {
+        setError("Invalid credentials");
+      }
+    } catch (rpcErr: unknown) {
+      const message = rpcErr instanceof Error
+        ? rpcErr.message
+        : "Login failed due to a network error.";
+      setError(message);
+      return;
     }
   }
 
